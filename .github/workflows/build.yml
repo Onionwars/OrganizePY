@@ -1,0 +1,115 @@
+# Builds an OrganizePY executable for Windows, macOS, and Linux.
+#
+# PyInstaller can't cross-compile: a build only runs correctly on the
+# OS it targets. So instead of building on one machine, this workflow
+# asks GitHub for one runner per OS and builds natively on each.
+#
+# Two ways to get a build out of this:
+#
+#   - Push to main / trigger manually -> each OS's build is uploaded
+#     as an Actions "artifact". Find it under the Actions tab -> pick
+#     the run -> Artifacts, at the bottom of the run summary.
+#
+#   - Push a version tag (e.g. `git tag v1.0.0 && git push --tags`)
+#     -> in addition to the artifacts above, a GitHub Release is
+#     created automatically with a zip for each OS attached, so
+#     users can just go to the repo's Releases page and download one.
+
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: OrganizePY-windows
+            dist_path: dist/OrganizePY
+          - os: macos-latest
+            artifact_name: OrganizePY-macos
+            dist_path: dist/OrganizePY.app
+          - os: ubuntu-latest
+            artifact_name: OrganizePY-linux
+            dist_path: dist/OrganizePY
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # tkinter ships with Python on Windows/macOS, but Ubuntu's
+      # python needs the system package installed separately.
+      - name: Install tkinter (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build executable
+        run: >
+          pyinstaller --noconfirm --clean --windowed
+          --name OrganizePY main.py
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.dist_path }}/**
+
+      # Only runs when the push was a version tag. Zips up this OS's
+      # build (upload-artifact above keeps the folder structure, but
+      # a release asset needs to be a single file) ready for the
+      # release job to attach.
+      - name: Zip release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          cd dist
+          zip -r "../${{ matrix.artifact_name }}.zip" "$(basename "${{ matrix.dist_path }}")"
+
+      - name: Upload release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.zip
+
+  # Runs once, after all three builds finish, only for a tag push.
+  # Pulls the zips built above and publishes them on a new GitHub
+  # Release named after the tag.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*.zip
+          generate_release_notes: true
